@@ -1,0 +1,95 @@
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+env:
+  GIT_AUTHOR_NAME: test
+  GIT_AUTHOR_EMAIL: test@example.com
+  GIT_COMMITTER_NAME: test
+  GIT_COMMITTER_EMAIL: test@example.com
+
+jobs:
+  action:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Create a repository without releases and a fake gh
+        run: |
+          git init --quiet --bare "$RUNNER_TEMP/origin.git"
+          git init --quiet --initial-branch=main "$RUNNER_TEMP/repo"
+          cd "$RUNNER_TEMP/repo"
+          git remote add origin "file://$RUNNER_TEMP/origin.git"
+          git commit --quiet --allow-empty -m "Add the action"
+          git push --quiet -u origin main
+          mkdir "$RUNNER_TEMP/bin"
+          cat > "$RUNNER_TEMP/bin/gh" <<'EOF'
+          #!/usr/bin/env bash
+          echo "$*" >> "$RUNNER_TEMP/gh.log"
+          if [ "$1 $2" = "release create" ]; then
+            git push --quiet origin "$5:refs/tags/$3"
+          fi
+          EOF
+          chmod +x "$RUNNER_TEMP/bin/gh"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Release the first version
+        id: first
+        uses: ./
+        with:
+          working-directory: ${{ runner.temp }}/repo
+      - name: Fix something
+        working-directory: ${{ runner.temp }}/repo
+        run: git commit --quiet --allow-empty -m "Fix something" && git push --quiet
+      - name: Release a patch version
+        id: patch
+        uses: ./
+        with:
+          working-directory: ${{ runner.temp }}/repo
+      - name: Release the same commit again
+        id: again
+        uses: ./
+        with:
+          working-directory: ${{ runner.temp }}/repo
+      - name: Add a feature
+        working-directory: ${{ runner.temp }}/repo
+        run: git commit --quiet --allow-empty -m "Add a feature" && git push --quiet
+      - name: Release a minor version
+        id: minor
+        uses: ./
+        with:
+          bump: minor
+          working-directory: ${{ runner.temp }}/repo
+      - name: Make a breaking change
+        working-directory: ${{ runner.temp }}/repo
+        run: git commit --quiet --allow-empty -m "Make a breaking change" && git push --quiet
+      - name: Release a major version
+        id: major
+        uses: ./
+        with:
+          bump: major
+          working-directory: ${{ runner.temp }}/repo
+      - name: Check the releases and the major tags
+        working-directory: ${{ runner.temp }}/repo
+        env:
+          FIRST: ${{ steps.first.outputs.version }}
+          PATCH: ${{ steps.patch.outputs.version }}
+          AGAIN: ${{ steps.again.outputs.version }}
+          MINOR: ${{ steps.minor.outputs.version }}
+          MAJOR: ${{ steps.major.outputs.version }}
+        run: |
+          remote_tag() { git ls-remote origin "refs/tags/$1" | cut -f1; }
+          test "$FIRST" = v1.0.0
+          test "$PATCH" = v1.0.1
+          test -z "$AGAIN"
+          test "$MINOR" = v1.1.0
+          test "$MAJOR" = v2.0.0
+          test "$(remote_tag v1.0.1)" = "$(git rev-parse HEAD~2)"
+          test "$(remote_tag v1.1.0)" = "$(git rev-parse HEAD~1)"
+          test "$(remote_tag v1)" = "$(git rev-parse HEAD~1)"
+          test "$(remote_tag v2)" = "$(git rev-parse HEAD)"
+          test "$(grep -c '^release create' "$RUNNER_TEMP/gh.log")" = 4
+          grep -q -- '--notes-start-tag v1.1.0' "$RUNNER_TEMP/gh.log"
